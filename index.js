@@ -342,3 +342,6 @@ app.listen(port, () => {
   console.log(`📧 Gmail: ${process.env.GMAIL_REFRESH_TOKEN ? 'Configured ✓' : 'Not configured ✗'}`);
   console.log(`🔑 Gemini: ${geminiKeys.length > 0 ? `Configured ✓ (${geminiKeys.length} keys active)` : 'Not configured ✗'}\n`);
 });
+
+// EXPORT UNTUK VERCEL SERVERLESS FUNCTION
+module.exports = app;
