@@ -56,6 +56,11 @@ const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
 // ENDPOINTS
 // ==========================================
 
+// Root endpoint - penting untuk Vercel health check
+app.get('/', (req, res) => {
+  res.json({ status: 'ok', message: 'STB Backend API is running with Gemini Vision' });
+});
+
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', message: 'STB Backend API is running with Gemini Vision' });
 });
@@ -334,6 +339,11 @@ app.post('/api/gmail/reply', upload.single('image'), async (req, res) => {
     console.error('Error sending reply:', error.message);
     res.status(500).json({ error: 'Failed to send reply', details: error.message });
   }
+});
+
+// 404 Handler
+app.use((req, res) => {
+  res.status(404).json({ error: 'Endpoint not found', path: req.path, method: req.method });
 });
 
 app.listen(port, () => {
