@@ -221,14 +221,15 @@ app.get('/api/gmail/search', async (req, res) => {
     if (!query) return res.status(400).json({ error: 'Query parameter is required' });
 
     if (!process.env.GMAIL_REFRESH_TOKEN) {
-      return res.status(500).json({ error: 'Gmail OAuth not configured' });
+      return res.status(500).json({ success: false, error: 'Gmail OAuth not configured' });
     }
 
     console.log(`Searching Gmail for: "${query}"`);
 
+    // Gunakan query lebih fleksibel: biarkan Gmail API mencari di subject/body/attachment sesuai query
     const response = await gmail.users.threads.list({
       userId: 'me',
-      q: `subject:"${query}"`, // Pencarian spesifik ke Subject Email
+      q: query,
       maxResults: 5,
     });
 
