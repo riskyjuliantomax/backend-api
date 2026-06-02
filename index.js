@@ -223,7 +223,7 @@ Jawab HANYA dengan format JSON valid, tanpa markdown, tanpa penjelasan tambahan:
 app.get('/api/gmail/search', async (req, res) => {
   try {
     const { query } = req.query;
-    if (!query) return res.status(400).json({ error: 'Query parameter is required' });
+    if (!query) return res.status(400).json({ success: false, error: 'Query parameter is required' });
 
     if (!process.env.GMAIL_REFRESH_TOKEN) {
       return res.status(500).json({ success: false, error: 'Gmail OAuth not configured' });
@@ -231,7 +231,7 @@ app.get('/api/gmail/search', async (req, res) => {
 
     console.log(`Searching Gmail for: "${query}"`);
 
-    // Gunakan query lebih fleksibel: biarkan Gmail API mencari di subject/body/attachment sesuai query
+    // Gunakan query fleksibel: biarkan Gmail API mencari di subject/body/attachment sesuai query
     const response = await gmail.users.threads.list({
       userId: 'me',
       q: query,
@@ -268,8 +268,13 @@ app.get('/api/gmail/search', async (req, res) => {
     res.json({ success: true, threads: threadDetails });
 
   } catch (error) {
-    console.error('Error searching Gmail:', error.message);
-    res.status(500).json({ error: 'Failed to search Gmail' });
+    console.error('Error searching Gmail:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to search Gmail',
+      details: error.message,
+      stack: error.stack
+    });
   }
 });
 
