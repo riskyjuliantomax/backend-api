@@ -252,6 +252,20 @@ app.get('/api/gmail/search', async (req, res) => {
       const headers = detail.data.messages[0].payload.headers;
       const subject = headers.find(h => h.name.toLowerCase() === 'subject')?.value || 'No Subject';
       const from = headers.find(h => h.name.toLowerCase() === 'from')?.value || 'Unknown';
+      const toHeader = headers.find(h => h.name.toLowerCase() === 'to')?.value || '';
+      const ccHeader = headers.find(h => h.name.toLowerCase() === 'cc')?.value || '';
+      // Extract email addresses from headers
+      const emailRegex = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/ig;
+      const recipientsList = [];
+      const collect = (s) => {
+        if (!s) return;
+        const matches = s.match(emailRegex);
+        if (matches) matches.forEach(m => { if (!recipientsList.includes(m)) recipientsList.push(m); });
+      };
+      collect(from);
+      collect(toHeader);
+      collect(ccHeader);
+      const recipients = recipientsList.join(', ');
       const date = headers.find(h => h.name.toLowerCase() === 'date')?.value || '';
 
       threadDetails.push({
@@ -259,6 +273,10 @@ app.get('/api/gmail/search', async (req, res) => {
         messageId: detail.data.messages[detail.data.messages.length - 1].id,
         subject,
         sender: from,
+        to: toHeader,
+        cc: ccHeader,
+        recipients,
+        recipientsList,
         date,
         snippet: detail.data.snippet
       });
@@ -282,6 +300,8 @@ app.get('/api/gmail/search', async (req, res) => {
 app.post('/api/gmail/reply', upload.single('image'), async (req, res) => {
   try {
     const { threadId, messageId, subject, toEmail } = req.body;
+    const replyAll = req.body.replyAll === 'true' || req.body.replyAll === true;
+    const recipients = req.body.recipients || '';
     const file = req.file;
 
     if (!file) return res.status(400).json({ error: 'Image attachment is required' });
@@ -300,8 +320,10 @@ app.post('/api/gmail/reply', upload.single('image'), async (req, res) => {
     const boundary = 'STB_SCANNER_BOUNDARY';
     const nl = '\r\n';
 
+    const toHeader = replyAll && recipients ? recipients : (toEmail || recipients || '');
+
     const str = [
-      `To: ${toEmail}`,
+      `To: ${toHeader}`,
       `Subject: Re: ${subject}`,
       `In-Reply-To: ${messageId}`,
       `References: ${messageId}`,
