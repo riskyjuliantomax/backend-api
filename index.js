@@ -332,6 +332,40 @@ Jawab HANYA dengan format JSON valid, tanpa markdown, tanpa penjelasan tambahan:
   }
 });
 
+// Fungsi untuk menghitung kecocokan thread Gmail dengan query No Permintaan secara akurat
+function calculateMatchScore(subject, snippet, query) {
+  if (!query) return 0;
+  
+  const clean = (str) => (str || '').toLowerCase().replace(/[\s/\\|.-]/g, '');
+  const cleanSubject = clean(subject);
+  const cleanSnippet = clean(snippet);
+  const cleanQuery = clean(query);
+  
+  // 1. Kecocokan persis (mengabaikan spasi/separator)
+  if (cleanSubject.includes(cleanQuery) || cleanSnippet.includes(cleanQuery)) {
+    return 100;
+  }
+  
+  // 2. Kecocokan sebagian (persentase kecocokan potongan nomor permintaan)
+  // Misal: "SL9/11/2025/014" -> parts: ["SL9", "11", "2025", "014"]
+  const parts = query.split(/[\s/\\|.-]+/).filter(Boolean);
+  if (parts.length === 0) return 0;
+  
+  let matchedParts = 0;
+  const lowerSubject = (subject || '').toLowerCase();
+  const lowerSnippet = (snippet || '').toLowerCase();
+  
+  for (const part of parts) {
+    const lowerPart = part.toLowerCase();
+    if (lowerSubject.includes(lowerPart) || lowerSnippet.includes(lowerPart)) {
+      matchedParts++;
+    }
+  }
+  
+  const percentage = Math.round((matchedParts / parts.length) * 100);
+  return Math.min(percentage, 85); // Batasi kecocokan parsial di 85% agar beda dengan 100% exact match
+}
+
 // 2. Endpoint to search Gmail threads based on No Permintaan
 app.get('/api/gmail/search', async (req, res) => {
   try {
@@ -381,6 +415,8 @@ app.get('/api/gmail/search', async (req, res) => {
       const recipients = recipientsList.join(', ');
       const date = headers.find(h => h.name.toLowerCase() === 'date')?.value || '';
 
+      const matchScore = calculateMatchScore(subject, detail.data.snippet, query);
+
       threadDetails.push({
         id: t.id,
         messageId: detail.data.messages[detail.data.messages.length - 1].id,
@@ -391,11 +427,15 @@ app.get('/api/gmail/search', async (req, res) => {
         recipients,
         recipientsList,
         date,
-        snippet: detail.data.snippet
+        snippet: detail.data.snippet,
+        matchScore
       });
     }
 
-    console.log(`Found ${threadDetails.length} threads.`);
+    // Urutkan berdasarkan matchScore tertinggi agar kecocokan persis selalu berada di posisi teratas
+    threadDetails.sort((a, b) => b.matchScore - a.matchScore);
+
+    console.log(`Found ${threadDetails.length} threads. Sorted by match score.`);
     res.json({ success: true, threads: threadDetails });
 
   } catch (error) {
