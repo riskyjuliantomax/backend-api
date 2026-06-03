@@ -299,36 +299,59 @@ app.get('/api/gmail/search', async (req, res) => {
 // 3. Endpoint to send reply with attachment
 app.post('/api/gmail/reply', upload.single('image'), async (req, res) => {
   try {
-    const { threadId, messageId, subject, toEmail } = req.body;
+    const { threadId, messageId, subject, toEmail, ccEmail, toEmailsAll } = req.body;
     const replyAll = req.body.replyAll === 'true' || req.body.replyAll === true;
-    const recipients = req.body.recipients || '';
     const file = req.file;
 
     if (!file) return res.status(400).json({ error: 'Image attachment is required' });
 
     console.log(`Sending reply to thread: ${threadId}`);
 
-    // Meningkatkan Kualitas Foto sebelum dikirim ke Gmail
-    console.log('Enhancing image quality for Gmail attachment...');
-    const enhancedImageBuffer = await sharp(file.buffer)
-      .normalize() // Menyeimbangkan kontras agar lebih jelas
-      .sharpen()   // Mempertajam foto yang agak buram
-      .jpeg({ quality: 100 }) // Kualitas maksimal 100%
-      .toBuffer();
+    // Gunakan buffer asli agar sesuai dengan crop di frontend
+    console.log('Using original cropped image buffer for Gmail attachment...');
+    const enhancedImageBuffer = file.buffer;
 
     // Construct MIME Message
     const boundary = 'STB_SCANNER_BOUNDARY';
     const nl = '\r\n';
 
-    const toHeader = replyAll && recipients ? recipients : (toEmail || recipients || '');
+    let toHeader = toEmail || '';
+    let ccHeader = '';
 
-    const str = [
+    if (replyAll) {
+      const toList = [];
+      if (toEmail) toList.push(toEmail);
+      if (toEmailsAll) {
+        const emailRegex = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/ig;
+        const matches = toEmailsAll.match(emailRegex);
+        if (matches) {
+          matches.forEach(m => {
+            if (!toList.some(x => x.toLowerCase() === m.toLowerCase())) {
+              toList.push(m);
+            }
+          });
+        }
+      }
+      toHeader = toList.join(', ');
+      ccHeader = ccEmail || '';
+    }
+
+    const mimeHeaders = [
       `To: ${toHeader}`,
       `Subject: Re: ${subject}`,
       `In-Reply-To: ${messageId}`,
-      `References: ${messageId}`,
-      `Content-Type: multipart/mixed; boundary="${boundary}"`,
-      '',
+      `References: ${messageId}`
+    ];
+
+    if (ccHeader) {
+      mimeHeaders.push(`Cc: ${ccHeader}`);
+    }
+
+    mimeHeaders.push(`Content-Type: multipart/mixed; boundary="${boundary}"`);
+    mimeHeaders.push('');
+
+    const str = [
+      ...mimeHeaders,
       `--${boundary}`,
       'Content-Type: text/plain; charset="UTF-8"',
       'Content-Transfer-Encoding: 7bit',
