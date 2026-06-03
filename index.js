@@ -102,11 +102,13 @@ function parseTesseractText(text) {
 
 async function processWithTesseract(buffer) {
   console.log('[OCR] Running Tesseract.js fallback...');
+  // OEM 1 = LSTM only (faster), PSM 6 = Assume a single uniform block of text
   const worker = await createWorker('eng', 1, {
-    langPath: __dirname, // pakai eng.traineddata lokal di folder backend
+    langPath: __dirname,
     logger: m => { if (m.status === 'recognizing text') console.log(`[Tesseract] ${Math.round(m.progress * 100)}%`); }
   });
   try {
+    await worker.setParameters({ tessedit_pageseg_mode: '6' });
     const { data: { text } } = await worker.recognize(buffer);
     console.log('[Tesseract] Raw text (first 300 chars):', text.substring(0, 300));
     return parseTesseractText(text);
@@ -161,18 +163,25 @@ app.post('/api/process-stb', upload.single('image'), async (req, res) => {
     console.log(`Original File: ${req.file.originalname || 'capture'} (${(req.file.size / 1024).toFixed(1)} KB)`);
     console.log('Compressing image for faster processing...');
 
-    // OPTIMASI GAMBAR untuk OCR:
-    // - Resolusi dinaikkan ke 2560px agar teks kecil dot matrix terbaca detail.
-    // - TIDAK dilakukan normalize/sharpen agresif karena bisa merusak teks di area bayangan.
-    // - Grayscale tetap dipakai untuk memperkecil ukuran file tanpa kehilangan detail teks.
+    // Buffer untuk GEMINI: resolusi tinggi 2560px agar AI bisa baca teks kecil
     const compressedBuffer = await sharp(req.file.buffer)
       .resize({ width: 2560, withoutEnlargement: true })
       .grayscale()
       .jpeg({ quality: 95 })
       .toBuffer();
 
-    console.log(`Compressed File Size: ${(compressedBuffer.length / 1024).toFixed(1)} KB`);
-    console.log('Sending optimized image to Gemini Vision AI...');
+    // Buffer untuk TESSERACT: ukuran lebih kecil 1200px + kontras tinggi agar cepat diproses
+    // (Vercel free limit ~10s, Tesseract butuh gambar kecil agar tidak timeout)
+    const tesseractBuffer = await sharp(req.file.buffer)
+      .resize({ width: 1200, withoutEnlargement: true })
+      .grayscale()
+      .normalize()  // kontras tinggi khusus untuk keterbacaan Tesseract
+      .sharpen()
+      .jpeg({ quality: 85 })
+      .toBuffer();
+
+    console.log(`OCR Buffer (Gemini): ${(compressedBuffer.length / 1024).toFixed(1)} KB | Tesseract: ${(tesseractBuffer.length / 1024).toFixed(1)} KB`);
+    console.log('Sending optimized image to OCR engine...');
 
     // Konversi image buffer yang sudah dikompres ke format yang dimengerti Gemini
     const imageBase64 = compressedBuffer.toString('base64');
@@ -261,18 +270,18 @@ Jawab HANYA dengan format JSON valid, tanpa markdown, tanpa penjelasan tambahan:
           parsedData = JSON.parse(cleanJson);
         } catch {
           console.warn('[OCR] Gemini JSON parse failed, running Tesseract fallback...');
-          parsedData = await processWithTesseract(compressedBuffer);
+          parsedData = await processWithTesseract(tesseractBuffer);
           ocrEngine = 'tesseract-fallback';
         }
       } else {
         // Semua key Gemini gagal — fallback ke Tesseract
         console.warn('[OCR] All Gemini keys exhausted. Falling back to Tesseract...');
-        parsedData = await processWithTesseract(compressedBuffer);
+        parsedData = await processWithTesseract(tesseractBuffer);
         ocrEngine = 'tesseract-fallback';
       }
     } else {
       // --- OCR LANGSUNG DENGAN TESSERACT (TANPA GEMINI) ---
-      parsedData = await processWithTesseract(compressedBuffer);
+      parsedData = await processWithTesseract(tesseractBuffer);
       ocrEngine = 'tesseract';
     }
 
