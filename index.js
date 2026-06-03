@@ -238,7 +238,7 @@ Jawab HANYA dengan format JSON valid, tanpa markdown, tanpa penjelasan tambahan:
         while (!isSuccess && attempts < maxAttempts) {
           const apiKey = geminiKeys[currentKeyIndex % geminiKeys.length];
           const genAI = new GoogleGenerativeAI(apiKey);
-          const geminiModel = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+          const geminiModel = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
           console.log(`[OCR] Using Gemini API Key slot: #${(currentKeyIndex % geminiKeys.length) + 1}`);
 
           let keySuccess = false;
@@ -512,7 +512,7 @@ app.use((req, res) => {
 
 app.listen(port, () => {
   console.log(`\n🚀 STB Backend API running on port ${port}`);
-  console.log(`🤖 OCR Engine: Google Gemini 1.5 Flash`);
+  console.log(`🤖 OCR Engine: Google Gemini 2.5 Flash`);
   console.log(`📧 Gmail: ${process.env.GMAIL_REFRESH_TOKEN ? 'Configured ✓' : 'Not configured ✗'}`);
   console.log(`🔑 Gemini: ${geminiKeys.length > 0 ? `Configured ✓ (${geminiKeys.length} keys active)` : 'Not configured ✗'}\n`);
 });
