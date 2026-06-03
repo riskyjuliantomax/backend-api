@@ -6,6 +6,7 @@ const { google } = require('googleapis');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const sharp = require('sharp');
 const fs = require('fs');
+const { createWorker } = require('tesseract.js');
 const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
@@ -22,13 +23,97 @@ const upload = multer({
 });
 
 // --- INIT GOOGLE GEMINI AI (ROTATION SYSTEM) ---
-// Baca semua API key yang dipisahkan koma
-const geminiKeys = (process.env.GEMINI_API_KEYS || process.env.GEMINI_API_KEY || '')
+// Baca semua API key dari .env sebagai fallback
+const envGeminiKeys = (process.env.GEMINI_API_KEYS || process.env.GEMINI_API_KEY || '')
   .split(',')
   .map(k => k.trim())
   .filter(Boolean);
 
 let currentKeyIndex = 0;
+
+// Ambil daftar API Key aktif dari Supabase. Jika Supabase tidak tersedia, pakai key dari .env.
+async function getActiveGeminiKeys() {
+  try {
+    if (!supabase) return envGeminiKeys;
+    const { data, error } = await supabase
+      .from('api_keys')
+      .select('key_value')
+      .eq('service_name', 'gemini')
+      .eq('is_active', true);
+    if (error || !data || data.length === 0) return envGeminiKeys;
+    return data.map(r => r.key_value);
+  } catch (e) {
+    console.warn('[Keys] Supabase key fetch failed, using .env keys:', e.message);
+    return envGeminiKeys;
+  }
+}
+
+// --- TESSERACT FALLBACK OCR ---
+// Parsing regex untuk ekstrak noPermintaan dan namaKapal dari teks mentah Tesseract
+function parseTesseractText(text) {
+  const armadas = [
+    { name: 'Maju Daya', codes: ['MD'] },
+    { name: 'Mega Daya', codes: ['MED'] },
+    { name: 'Intan Daya', codes: ['ID'] },
+    { name: 'Terus Daya', codes: ['TD'] },
+    { name: 'Central Daya', codes: ['CD'] },
+  ];
+
+  // Regex fleksibel: KODE/BULAN/TAHUN/URUT (toleran terhadap spasi dan separator tak biasa)
+  const requestRegex = /([A-Z]{2,5}\d{1,3})\s*[/\\|.]\s*(\d{1,2})\s*[/\\|.]\s*(\d{4})\s*[/\\|.]\s*(\d{2,4})/gi;
+  const matches = [...text.matchAll(requestRegex)];
+  const noPermintaan = matches.length > 0
+    ? matches.map(m => `${m[1]}/${m[2]}/${m[3]}/${m[4]}`.toUpperCase()).join(', ')
+    : null;
+
+  // Cari nama kapal armada
+  let namaKapal = null;
+  const upperText = text.toUpperCase();
+  for (const armada of armadas) {
+    if (upperText.includes(armada.name.toUpperCase())) {
+      // Coba tangkap nomor kapal di belakang nama armada
+      const shipNumRegex = new RegExp(armada.name.replace(' ', '\\s+') + '\\s*(\\d+)', 'i');
+      const shipMatch = text.match(shipNumRegex);
+      namaKapal = shipMatch ? `${armada.name} ${shipMatch[1]}` : armada.name;
+      break;
+    }
+    // Fallback: cek via kode singkatan
+    if (noPermintaan) {
+      for (const code of armada.codes) {
+        if (noPermintaan.toUpperCase().startsWith(code)) {
+          namaKapal = armada.name;
+          break;
+        }
+      }
+    }
+    if (namaKapal) break;
+  }
+
+  // Nama barang: ambil baris-baris yang mengandung angka urut dan kata kerja material
+  const itemLines = text.split('\n').filter(line =>
+    /^\s*\d+[.)\s]/.test(line) && line.trim().length > 5
+  );
+  const namaBarang = itemLines.length > 0
+    ? itemLines.map((l, i) => `${i + 1}. ${l.trim().replace(/^\d+[.)\s]+/, '').trim()}`).join(', ')
+    : null;
+
+  return { noPermintaan, namaKapal, namaBarang };
+}
+
+async function processWithTesseract(buffer) {
+  console.log('[OCR] Running Tesseract.js fallback...');
+  const worker = await createWorker('eng', 1, {
+    langPath: __dirname, // pakai eng.traineddata lokal di folder backend
+    logger: m => { if (m.status === 'recognizing text') console.log(`[Tesseract] ${Math.round(m.progress * 100)}%`); }
+  });
+  try {
+    const { data: { text } } = await worker.recognize(buffer);
+    console.log('[Tesseract] Raw text (first 300 chars):', text.substring(0, 300));
+    return parseTesseractText(text);
+  } finally {
+    await worker.terminate();
+  }
+}
 
 // --- SETUP SUPABASE ---
 const WebSocket = require('ws'); // Fix untuk Node.js < 22
@@ -76,14 +161,14 @@ app.post('/api/process-stb', upload.single('image'), async (req, res) => {
     console.log(`Original File: ${req.file.originalname || 'capture'} (${(req.file.size / 1024).toFixed(1)} KB)`);
     console.log('Compressing image for faster processing...');
 
-    // KOMPRESI & PENAJAMAN GAMBAR (KHUSUS DOT MATRIX KERTAS PANJANG):
-    // Kita naikkan resolusi ke 1600px agar huruf kecil tidak blur saat difoto dari jauh.
+    // OPTIMASI GAMBAR untuk OCR:
+    // - Resolusi dinaikkan ke 2560px agar teks kecil dot matrix terbaca detail.
+    // - TIDAK dilakukan normalize/sharpen agresif karena bisa merusak teks di area bayangan.
+    // - Grayscale tetap dipakai untuk memperkecil ukuran file tanpa kehilangan detail teks.
     const compressedBuffer = await sharp(req.file.buffer)
-      .resize({ width: 1600, withoutEnlargement: true })
-      .grayscale() // Buang warna
-      .normalize() // Auto-contrast: kertas jadi putih bersih, tinta pudar jadi hitam pekat
-      .sharpen()   // Penajaman ekstrem agar titik-titik dot matrix tidak menyatu/blur
-      .jpeg({ quality: 85 }) // Kualitas sedikit dinaikkan
+      .resize({ width: 2560, withoutEnlargement: true })
+      .grayscale()
+      .jpeg({ quality: 95 })
       .toBuffer();
 
     console.log(`Compressed File Size: ${(compressedBuffer.length / 1024).toFixed(1)} KB`);
@@ -126,87 +211,82 @@ INSTRUKSI FINAL:
 Jawab HANYA dengan format JSON valid, tanpa markdown, tanpa penjelasan tambahan:
 {"noPermintaan": "SEMUA_NOMOR_HASIL_KOREKSI_DIPISAH_KOMA", "namaKapal": "NAMA_KAPAL", "namaBarang": "DAFTAR_BARANG_HASIL_EKSTRAKSI"}`;
 
-    let result;
-    let isSuccess = false;
-    let attempts = 0;
-    const maxAttempts = geminiKeys.length;
+    // Cek apakah user meminta pakai AI atau Tesseract lokal
+    const useAI = req.body.useAI !== 'false'; // default: true
 
-    if (maxAttempts === 0) throw new Error('Tidak ada Gemini API Key yang terkonfigurasi di .env');
-
-    // ROTASI API KEY: Coba pakai kunci satu per satu sampai berhasil
-    while (!isSuccess && attempts < maxAttempts) {
-      try {
-        const apiKey = geminiKeys[currentKeyIndex];
-        const genAI = new GoogleGenerativeAI(apiKey);
-        const geminiModel = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
-
-        console.log(`[OCR] Using Gemini API Key slot: #${currentKeyIndex + 1}`);
-
-        result = await geminiModel.generateContent({
-          contents: [{
-            role: "user",
-            parts: [
-              { text: prompt },
-              { inlineData: { data: imageBase64, mimeType: mimeType } }
-            ]
-          }],
-          // PEMBATASAN UNTUK KECEPATAN KILAT:
-          // Kunci output murni ke JSON agar AI tidak bisa "yapping" atau menulis penjelasan
-          generationConfig: {
-            temperature: 0.1, // Suhu super rendah agar fokus
-            responseMimeType: "application/json"
-          }
-        });
-
-        isSuccess = true; // Berhasil! Keluar dari loop.
-      } catch (geminiError) {
-        console.error(`[OCR] Key #${currentKeyIndex + 1} Failed:`, geminiError.message);
-        // Geser ke kunci berikutnya
-        currentKeyIndex = (currentKeyIndex + 1) % geminiKeys.length;
-        attempts++;
-
-        if (attempts >= maxAttempts) {
-          throw new Error('Gangguan koneksi ke AI atau kuota harian habis. Silakan coba lagi.');
-        }
-        console.log(`[OCR] Switching to next API Key...`);
-      }
-    }
-
-    const responseText = result.response.text().trim();
-    console.log('Gemini Response:', responseText);
-
-    // Parse JSON dari response Gemini
     let parsedData = { noPermintaan: null, namaKapal: null, namaBarang: null };
-    try {
-      // Bersihkan response (kadang Gemini membungkusnya dengan ```json ... ```)
-      const cleanJson = responseText.replace(/```json\n?|\n?```/g, '').trim();
-      parsedData = JSON.parse(cleanJson);
-    } catch (parseErr) {
-      console.warn('Could not parse JSON, trying regex fallback...');
-      // Fallback: coba cari dengan regex langsung dari response text
-      const fallbackRegex = /([A-Z]{2}\d{2}[\s/\\|-]?\d{2,4}[\s/\\|-]?\d{2,4}[\s/\\|-]?\d{2,3})/i;
-      const fallbackMatch = responseText.match(fallbackRegex);
-      parsedData.noPermintaan = fallbackMatch ? fallbackMatch[0] : null;
+    let ocrEngine = 'tesseract';
+
+    if (useAI) {
+      // --- COBA OCR DENGAN GEMINI (KEY DARI SUPABASE / .ENV) ---
+      const geminiKeys = await getActiveGeminiKeys();
+      let result;
+      let isSuccess = false;
+      let attempts = 0;
+      const maxAttempts = geminiKeys.length;
+
+      if (maxAttempts > 0) {
+        while (!isSuccess && attempts < maxAttempts) {
+          try {
+            const apiKey = geminiKeys[currentKeyIndex % geminiKeys.length];
+            const genAI = new GoogleGenerativeAI(apiKey);
+            const geminiModel = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+            console.log(`[OCR] Using Gemini API Key slot: #${(currentKeyIndex % geminiKeys.length) + 1}`);
+
+            result = await geminiModel.generateContent({
+              contents: [{ role: 'user', parts: [
+                { text: prompt },
+                { inlineData: { data: imageBase64, mimeType: mimeType } }
+              ]}],
+              generationConfig: { temperature: 0.1, responseMimeType: 'application/json' }
+            });
+
+            isSuccess = true;
+            ocrEngine = 'gemini';
+          } catch (geminiError) {
+            console.error(`[OCR] Key #${(currentKeyIndex % geminiKeys.length) + 1} Failed:`, geminiError.message);
+            currentKeyIndex = (currentKeyIndex + 1) % Math.max(geminiKeys.length, 1);
+            attempts++;
+            if (attempts < maxAttempts) console.log('[OCR] Switching to next API Key...');
+          }
+        }
+      }
+
+      if (isSuccess && result) {
+        // Parse JSON dari Gemini
+        const responseText = result.response.text().trim();
+        console.log('Gemini Response:', responseText);
+        try {
+          const cleanJson = responseText.replace(/```json\n?|\n?```/g, '').trim();
+          parsedData = JSON.parse(cleanJson);
+        } catch {
+          console.warn('[OCR] Gemini JSON parse failed, running Tesseract fallback...');
+          parsedData = await processWithTesseract(compressedBuffer);
+          ocrEngine = 'tesseract-fallback';
+        }
+      } else {
+        // Semua key Gemini gagal — fallback ke Tesseract
+        console.warn('[OCR] All Gemini keys exhausted. Falling back to Tesseract...');
+        parsedData = await processWithTesseract(compressedBuffer);
+        ocrEngine = 'tesseract-fallback';
+      }
+    } else {
+      // --- OCR LANGSUNG DENGAN TESSERACT (TANPA GEMINI) ---
+      parsedData = await processWithTesseract(compressedBuffer);
+      ocrEngine = 'tesseract';
     }
 
+    console.log(`[OCR] Engine used: ${ocrEngine}`);
     console.log('Final Result:', parsedData);
-
-    // --- SIMPAN KE DATABASE SUPABASE ---
-    // DIPINDAHKAN KE FRONTEND: Data tidak lagi disimpan otomatis di sini.
-    // User akan mereview hasil OCR terlebih dahulu, membalas email,
-    // lalu baru menekan tombol "Simpan ke Arsip" yang akan menyimpan
-    // data ke Supabase dan foto asli ke IndexedDB (local storage) di perangkat.
-    let dbStatus = "Penyimpanan arsip dipindahkan ke sisi klien (frontend)";
 
     res.json({
       success: true,
+      ocrEngine,
       data: {
         noPermintaan: parsedData.noPermintaan,
         namaKapal: parsedData.namaKapal,
         namaBarang: parsedData.namaBarang,
-        rawText: responseText
       },
-      database: dbStatus
     });
 
   } catch (error) {
