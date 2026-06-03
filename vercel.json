@@ -3,7 +3,15 @@
   "builds": [
     {
       "src": "index.js",
-      "use": "@vercel/node"
+      "use": "@vercel/node",
+      "config": {
+        "includeFiles": [
+          "node_modules/tesseract.js-core/tesseract-core-relaxedsimd.wasm",
+          "node_modules/tesseract.js-core/tesseract-core-simd.wasm",
+          "node_modules/tesseract.js-core/tesseract-core.wasm",
+          "eng.traineddata"
+        ]
+      }
     }
   ],
   "routes": [

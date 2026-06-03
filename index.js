@@ -236,27 +236,51 @@ Jawab HANYA dengan format JSON valid, tanpa markdown, tanpa penjelasan tambahan:
 
       if (maxAttempts > 0) {
         while (!isSuccess && attempts < maxAttempts) {
-          try {
-            const apiKey = geminiKeys[currentKeyIndex % geminiKeys.length];
-            const genAI = new GoogleGenerativeAI(apiKey);
-            const geminiModel = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
-            console.log(`[OCR] Using Gemini API Key slot: #${(currentKeyIndex % geminiKeys.length) + 1}`);
+          const apiKey = geminiKeys[currentKeyIndex % geminiKeys.length];
+          const genAI = new GoogleGenerativeAI(apiKey);
+          const geminiModel = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+          console.log(`[OCR] Using Gemini API Key slot: #${(currentKeyIndex % geminiKeys.length) + 1}`);
 
-            result = await geminiModel.generateContent({
-              contents: [{ role: 'user', parts: [
-                { text: prompt },
-                { inlineData: { data: imageBase64, mimeType: mimeType } }
-              ]}],
-              generationConfig: { temperature: 0.1, responseMimeType: 'application/json' }
-            });
+          let keySuccess = false;
+          let keyAttempts = 0;
+          const maxKeyRetries = 2; // total 3 attempts per key
 
-            isSuccess = true;
-            ocrEngine = 'gemini';
-          } catch (geminiError) {
-            console.error(`[OCR] Key #${(currentKeyIndex % geminiKeys.length) + 1} Failed:`, geminiError.message);
-            currentKeyIndex = (currentKeyIndex + 1) % Math.max(geminiKeys.length, 1);
-            attempts++;
-            if (attempts < maxAttempts) console.log('[OCR] Switching to next API Key...');
+          while (!keySuccess && keyAttempts <= maxKeyRetries) {
+            try {
+              result = await geminiModel.generateContent({
+                contents: [{ role: 'user', parts: [
+                  { text: prompt },
+                  { inlineData: { data: imageBase64, mimeType: mimeType } }
+                ]}],
+                generationConfig: { temperature: 0.1, responseMimeType: 'application/json' }
+              });
+
+              keySuccess = true;
+              isSuccess = true;
+              ocrEngine = 'gemini';
+            } catch (geminiError) {
+              keyAttempts++;
+              const errMsg = geminiError.message || '';
+              const isTransient = errMsg.includes('503') || 
+                                  errMsg.includes('429') || 
+                                  errMsg.toLowerCase().includes('demand') ||
+                                  errMsg.toLowerCase().includes('overloaded') ||
+                                  errMsg.toLowerCase().includes('service unavailable') ||
+                                  errMsg.toLowerCase().includes('resource exhausted') ||
+                                  errMsg.toLowerCase().includes('fetch failed') ||
+                                  errMsg.toLowerCase().includes('timeout');
+
+              if (isTransient && keyAttempts <= maxKeyRetries) {
+                console.warn(`[OCR] Transient error on Key #${(currentKeyIndex % geminiKeys.length) + 1}: ${errMsg}. Retrying in 1.5s... (Attempt ${keyAttempts}/${maxKeyRetries + 1})`);
+                await new Promise(resolve => setTimeout(resolve, 1500));
+              } else {
+                console.error(`[OCR] Key #${(currentKeyIndex % geminiKeys.length) + 1} Failed:`, errMsg);
+                currentKeyIndex = (currentKeyIndex + 1) % Math.max(geminiKeys.length, 1);
+                attempts++;
+                if (attempts < maxAttempts) console.log('[OCR] Switching to next API Key...');
+                break; // Break inner loop to try next key
+              }
+            }
           }
         }
       }
@@ -488,7 +512,7 @@ app.use((req, res) => {
 
 app.listen(port, () => {
   console.log(`\n🚀 STB Backend API running on port ${port}`);
-  console.log(`🤖 OCR Engine: Google Gemini 2.5 Flash`);
+  console.log(`🤖 OCR Engine: Google Gemini 1.5 Flash`);
   console.log(`📧 Gmail: ${process.env.GMAIL_REFRESH_TOKEN ? 'Configured ✓' : 'Not configured ✗'}`);
   console.log(`🔑 Gemini: ${geminiKeys.length > 0 ? `Configured ✓ (${geminiKeys.length} keys active)` : 'Not configured ✗'}\n`);
 });
